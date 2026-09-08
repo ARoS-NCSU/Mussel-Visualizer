@@ -1,0 +1,6 @@
+numpy>=1.26,<3
+scipy>=1.11,<2
+Pillow>=10,<12
+usd-core==26.8
+plotly>=5.24,<6
+streamlit>=1.38,<2
