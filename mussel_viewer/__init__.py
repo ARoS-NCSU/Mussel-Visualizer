@@ -14,8 +14,14 @@ import streamlit.components.v1 as components
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
 _GLB_PATH = os.path.join(_FRONTEND_DIR, "assets", "mussel.glb")
+_META_PATH = os.path.join(_FRONTEND_DIR, "assets", "mussel_meta.json")
 
 _component = components.declare_component("mussel_viewer", path=_FRONTEND_DIR)
+
+
+def assets_exist() -> bool:
+    """Whether the converted model (see mussel_loader.py) is in place."""
+    return os.path.exists(_GLB_PATH) and os.path.exists(_META_PATH)
 
 
 def mussel_viewer(

@@ -1,5 +1,4 @@
-assets/
-mussel_viewer/frontend/assets/
+/assets/
 __pycache__/
 *.pyc
 .venv/

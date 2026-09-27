@@ -13,8 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import geometry
-import mussel_loader
-from mussel_viewer import mussel_viewer
+from mussel_viewer import assets_exist, mussel_viewer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 RENDER_CONFIG_PATH = os.path.join(_HERE, "render_config.json")
@@ -26,7 +25,13 @@ st.set_page_config(page_title="Mussel 3D Visualizer", layout="wide")
 
 @st.cache_resource(show_spinner="Converting the mussel model (first run only)…")
 def ensure_assets() -> None:
-    mussel_loader.ensure_assets()
+    # The converted assets are committed, so deployments never convert. Only
+    # import the loader (and usd-core) when they are missing: conversion
+    # peaks at ~4 GB of RAM, more than Streamlit Community Cloud allows.
+    if not assets_exist():
+        import mussel_loader
+
+        mussel_loader.convert()
 
 
 def load_render_config() -> dict:

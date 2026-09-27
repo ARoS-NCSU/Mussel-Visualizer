@@ -39,8 +39,10 @@ The source model is a binary [OpenUSD](https://openusd.org/) (`.usdc`) file.
   uses these to find the lowest/highest point after any rotation, which drives
   the rest-on-substrate and burial logic.
 
-Conversion runs automatically the first time the app starts, or whenever
-the assets are missing, and takes a few seconds.
+These generated files are committed to the repo, so the app never has to
+convert at startup. That matters for deployment: conversion takes ~4 GB of
+RAM, more than Streamlit Community Cloud provides. If the files are missing,
+the app converts automatically (locally this takes a few seconds).
 
 ### Conventions
 
@@ -76,7 +78,8 @@ streamlit run app.py
 This opens the app in your browser (by default at `http://localhost:8501`).
 
 To regenerate the viewer assets, for example after changing the model or
-the conversion settings:
+the conversion settings, run the following and commit the updated files in
+`mussel_viewer/frontend/assets/`:
 
 ```bash
 python mussel_loader.py
@@ -89,7 +92,7 @@ Model01/                     Source 3D model: Musselv1.usdc + textures/
 mussel_loader.py             USD -> mussel.glb + mussel_meta.json conversion
 mussel_viewer/__init__.py    Streamlit component wrapper: mussel_viewer(...) -> pose
 mussel_viewer/frontend/      three.js viewer (plain HTML/JS/CSS, no build step)
-  assets/                    Generated GLB + metadata (gitignored, rebuilt automatically)
+  assets/                    Generated GLB + metadata (committed; regenerate with mussel_loader.py)
 geometry.py                  Python pose helpers (quaternion/Euler -> rotation matrix)
 app.py                       Streamlit entrypoint: viewer + committed-pose panel
 render_config.json           Camera + color configuration (see below)

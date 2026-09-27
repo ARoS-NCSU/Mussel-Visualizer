@@ -11,8 +11,11 @@ browser fetches them once and caches them):
   find the mussel's lowest/highest point after a rotation, which is what the
   "rest on the substrate" and burial-depth logic need.
 
-Only this module imports ``pxr``. Run ``python mussel_loader.py`` to
-regenerate the assets; ``app.py`` also runs it automatically if they are
+Only this module imports ``pxr``. The generated assets are committed to
+the repo, so the app (and deployments such as Streamlit Community Cloud)
+never needs to convert: conversion peaks at ~4 GB of RAM. Run
+``python mussel_loader.py`` after changing the model or conversion settings,
+and commit the regenerated files. ``app.py`` also runs it if they are
 missing.
 """
 from __future__ import annotations
@@ -380,15 +383,6 @@ def convert(usd_path: str = USD_PATH, glb_path: str = GLB_PATH, meta_path: str =
         f"{n_tris} triangles, texture={'yes' if texture_jpeg else 'no'})"
     )
     print(f"[mussel_loader] wrote {meta_path} (hull points={len(hull)}, bounding_radius={bounding_radius:.4f})")
-
-
-def assets_exist() -> bool:
-    return os.path.exists(GLB_PATH) and os.path.exists(META_PATH)
-
-
-def ensure_assets() -> None:
-    if not assets_exist():
-        convert()
 
 
 if __name__ == "__main__":
