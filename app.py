@@ -1,24 +1,32 @@
-"""Streamlit entrypoint: mussel orientation/burial sliders + 3D view."""
+"""Streamlit entrypoint: interactive mussel viewer + pose readout.
+
+All rendering and interaction (drag-to-rotate, orientation and burial
+sliders) happens inside the three.js component in the browser. This script
+only reruns when an interaction ends and the component reports a new pose.
+"""
 from __future__ import annotations
 
 import json
 import os
 
+import pandas as pd
 import streamlit as st
 
 import geometry
 import mussel_loader
-import render_plotly
+from mussel_viewer import mussel_viewer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 RENDER_CONFIG_PATH = os.path.join(_HERE, "render_config.json")
 
+DEFAULT_POSE = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0, "height": 0.0}
+
 st.set_page_config(page_title="Mussel 3D Visualizer", layout="wide")
 
 
-@st.cache_resource
-def get_mesh() -> mussel_loader.MeshData:
-    return mussel_loader.load_mesh()
+@st.cache_resource(show_spinner="Converting the mussel model (first run only)…")
+def ensure_assets() -> None:
+    mussel_loader.ensure_assets()
 
 
 def load_render_config() -> dict:
@@ -26,70 +34,46 @@ def load_render_config() -> dict:
         return json.load(f)
 
 
-mesh_data = get_mesh()
+ensure_assets()
 render_config = load_render_config()
 
 st.title("Mussel 3D Visualizer")
 
-with st.sidebar:
-    st.header("Mussel orientation")
-    yaw = st.slider("Yaw (deg)", -180.0, 180.0, 0.0, step=1.0)
-    pitch = st.slider("Pitch (deg)", -180.0, 180.0, 0.0, step=1.0)
-    roll = st.slider("Roll (deg)", -180.0, 180.0, 0.0, step=1.0)
-
-    st.header("Burial")
-    height = st.slider(
-        "Height",
-        -1.0,
-        0.0,
-        0.0,
-        step=0.01,
-        help="0 = resting on top of the substrate, -1 = fully buried",
-    )
-
-# Only recompute the mussel's rotation when orientation actually changed;
-# a height-only rerun reuses the cached posed vertices. This is a modest
-# CPU saving, not a fix for the browser-side WebGL rebuild cost (both
-# traces still live in one figure/scene — see render_plotly.py for why).
-orientation_key = (yaw, pitch, roll)
-if st.session_state.get("_orientation_key") != orientation_key:
-    posed_vertices, z_range = geometry.rotate_and_rest(
-        mesh_data.vertices, mesh_data.rest_centroid, yaw, pitch, roll
-    )
-    st.session_state["_orientation_key"] = orientation_key
-    st.session_state["_posed_vertices"] = posed_vertices
-    st.session_state["_z_range"] = z_range
-else:
-    posed_vertices = st.session_state["_posed_vertices"]
-    z_range = st.session_state["_z_range"]
-
-plane_z = geometry.plane_z_from_height(height, z_range)
-plane_vertices, plane_faces = geometry.make_substrate_plane(
-    mesh_data.bounding_radius, render_config.get("substrate_size_scale", 2.2), z=plane_z
-)
-
-fig = render_plotly.build_figure(
-    posed_vertices,
-    mesh_data.faces,
-    mesh_data.vertex_colors,
-    plane_vertices,
-    plane_faces,
+pose = mussel_viewer(
     render_config,
-)
+    initial_pose=DEFAULT_POSE,
+    height=render_config.get("viewer_height", 640),
+    key="mussel_viewer",
+) or dict(DEFAULT_POSE)
 
-view_col, params_col = st.columns([3, 1])
-with view_col:
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        theme=None,
-        key="mussel_plot",
-        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+st.subheader("Committed pose")
+st.caption("Updated when you release the mouse or a slider.")
+
+metric_cols = st.columns(5)
+metric_cols[0].metric("Yaw", f"{pose['yaw']:.1f}°")
+metric_cols[1].metric("Pitch", f"{pose['pitch']:.1f}°")
+metric_cols[2].metric("Roll", f"{pose['roll']:.1f}°")
+metric_cols[3].metric("Height", f"{pose['height']:.2f}")
+metric_cols[4].metric("Approx. burial", f"{abs(pose['height']) * 100:.0f}%")
+
+matrix_col, export_col = st.columns([2, 1])
+with matrix_col:
+    st.markdown("**Rotation matrix** (mussel frame → world, Z up)")
+    st.caption("Column j is the mussel's j-axis expressed in world coordinates.")
+    st.dataframe(
+        pd.DataFrame(
+            geometry.rotation_matrix(pose),
+            index=["world X", "world Y", "world Z"],
+            columns=["mussel x", "mussel y", "mussel z"],
+        ).style.format("{:+.4f}"),
     )
-with params_col:
-    st.subheader("Current parameters")
-    st.metric("Yaw", f"{yaw:.1f}°")
-    st.metric("Pitch", f"{pitch:.1f}°")
-    st.metric("Roll", f"{roll:.1f}°")
-    st.metric("Height", f"{height:.2f}")
-    st.metric("Approx. burial", f"{abs(height) * 100:.0f}%")
+with export_col:
+    st.markdown("**Export**")
+    st.download_button(
+        "Download pose (JSON)",
+        data=json.dumps(pose, indent=2),
+        file_name="mussel_pose.json",
+        mime="application/json",
+    )
+    with st.expander("Raw pose"):
+        st.json(pose)

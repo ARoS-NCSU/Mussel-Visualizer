@@ -6,5 +6,6 @@
   },
   "substrate_color": "#C2B280",
   "background_color": "#FFFFFF",
-  "substrate_size_scale": 2.2
+  "substrate_size_scale": 2.2,
+  "viewer_height": 640
 }

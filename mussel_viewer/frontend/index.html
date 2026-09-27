@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mussel viewer</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="root">
+    <div id="view">
+      <canvas id="canvas"></canvas>
+      <div id="status">Loading model…</div>
+      <div id="hint">Drag the mussel to rotate it</div>
+    </div>
+
+    <aside id="panel">
+      <section>
+        <h2>Orientation</h2>
+        <div class="control" data-param="yaw">
+          <label for="yaw-range">Yaw <span class="axis">Z</span></label>
+          <input id="yaw-range" type="range" min="-180" max="180" step="0.5" value="0" />
+          <input id="yaw-num" type="number" min="-180" max="180" step="0.5" value="0" />
+        </div>
+        <div class="control" data-param="pitch">
+          <label for="pitch-range">Pitch <span class="axis">Y</span></label>
+          <input id="pitch-range" type="range" min="-90" max="90" step="0.5" value="0" />
+          <input id="pitch-num" type="number" min="-90" max="90" step="0.5" value="0" />
+        </div>
+        <div class="control" data-param="roll">
+          <label for="roll-range">Roll <span class="axis">X</span></label>
+          <input id="roll-range" type="range" min="-180" max="180" step="0.5" value="0" />
+          <input id="roll-num" type="number" min="-180" max="180" step="0.5" value="0" />
+        </div>
+        <p id="gimbal" class="warn" hidden>Pitch is near ±90°: yaw and roll are no longer independent (gimbal lock).</p>
+      </section>
+
+      <section>
+        <h2>Burial</h2>
+        <div class="control" data-param="height">
+          <label for="height-range">Height</label>
+          <input id="height-range" type="range" min="-1" max="0" step="0.01" value="0" />
+          <input id="height-num" type="number" min="-1" max="0" step="0.01" value="0" />
+        </div>
+        <p class="note">0 = resting on the substrate, −1 = fully buried</p>
+      </section>
+
+      <section>
+        <h2>Current pose</h2>
+        <dl id="readout">
+          <dt>Yaw</dt><dd id="r-yaw">0.0°</dd>
+          <dt>Pitch</dt><dd id="r-pitch">0.0°</dd>
+          <dt>Roll</dt><dd id="r-roll">0.0°</dd>
+          <dt>Quaternion</dt><dd id="r-quat" class="mono">w 1.000 x 0.000 y 0.000 z 0.000</dd>
+          <dt>Height</dt><dd id="r-height">0.00</dd>
+          <dt>Burial</dt><dd id="r-burial">0%</dd>
+        </dl>
+      </section>
+
+      <section class="toggles">
+        <label><input id="opt-seethrough" type="checkbox" /> See-through substrate</label>
+        <label><input id="opt-axes" type="checkbox" /> Show mussel axes</label>
+        <button id="reset" type="button">Reset pose</button>
+      </section>
+    </aside>
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

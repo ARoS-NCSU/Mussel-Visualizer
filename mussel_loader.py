@@ -1,45 +1,58 @@
-"""Stage 1: convert the mussel USDC model into a lightweight numpy cache.
+"""Convert the mussel USDC model into web-friendly assets for the viewer.
 
-Only this module imports `pxr` and `PIL` — everything downstream of the
-cached `.npz` file works with plain numpy arrays.
+Outputs (written into the viewer component's static directory, so the
+browser fetches them once and caches them):
+
+- ``mussel.glb``: full-resolution, textured glTF binary. Vertices are
+  expressed relative to the mussel's rest-pose center, so rotating the glTF
+  node rotates the mussel about its own center.
+- ``mussel_meta.json``: the convex-hull vertices (same frame as the GLB)
+  plus a few scalars. The viewer transforms only these few hundred points to
+  find the mussel's lowest/highest point after a rotation, which is what the
+  "rest on the substrate" and burial-depth logic need.
+
+Only this module imports ``pxr``. Run ``python mussel_loader.py`` to
+regenerate the assets; ``app.py`` also runs it automatically if they are
+missing.
 """
 from __future__ import annotations
 
-import dataclasses
+import io
+import json
 import os
+import struct
 import sys
 
 import numpy as np
 from PIL import Image
 from pxr import Usd, UsdGeom, UsdShade
-from scipy.ndimage import map_coordinates
+from scipy.spatial import ConvexHull
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 USD_PATH = os.path.join(_HERE, "Model01", "Musselv1.usdc")
-CACHE_PATH = os.path.join(_HERE, "assets", "mussel.npz")
+ASSETS_DIR = os.path.join(_HERE, "mussel_viewer", "frontend", "assets")
+GLB_PATH = os.path.join(ASSETS_DIR, "mussel.glb")
+META_PATH = os.path.join(ASSETS_DIR, "mussel_meta.json")
 MUSSEL_ROOT_PATH = "/root/Mussel"
 
-# If the baked texture ever looks vertically mirrored, flip this.
+# USD's st origin is bottom-left, glTF's is top-left. If the texture ever
+# looks vertically mirrored in the viewer, flip this.
 FLIP_V = True
 
-# Triangle count above which we automatically decimate (voxel clustering)
-# down toward DECIMATE_TARGET_TRIANGLES. The raw Musselv1.usdc mesh is
-# ~714k triangles, which measurably freezes the browser tab for 20-30s per
-# slider drag when sent to Plotly on every Streamlit rerun — decimation is
-# required for the app to be usable, not just a nice-to-have.
-DECIMATE_THRESHOLD_TRIANGLES = 120_000
-DECIMATE_TARGET_TRIANGLES = 10_000
+# Longest side of the texture embedded in the GLB. JPEG keeps the download
+# small; the source PNG is 2048px.
+TEXTURE_MAX_SIZE = 2048
+TEXTURE_JPEG_QUALITY = 90
 
-_FALLBACK_COLOR = np.array([160, 160, 160], dtype=np.uint8)
+# Normals are compared after rounding to this many steps per unit, so that
+# corners sharing a point, a UV and (nearly) the same normal become one vertex.
+_NORMAL_QUANT = 1024
 
+# Directions used to thin the convex hull shipped to the viewer (see
+# _support_points). More directions = more exact resting/burial height.
+SUPPORT_DIRECTIONS = 8000
 
-@dataclasses.dataclass
-class MeshData:
-    vertices: np.ndarray        # (N, 3) float32, Z-up world space, rest pose
-    faces: np.ndarray           # (M, 3) int32, triangulated
-    vertex_colors: np.ndarray   # (N, 3) uint8
-    rest_centroid: np.ndarray   # (3,) float32
-    bounding_radius: float
+_FALLBACK_COLOR = (0.63, 0.63, 0.63)
 
 
 def _find_mesh_prims(stage: Usd.Stage) -> list[Usd.Prim]:
@@ -54,105 +67,46 @@ def _find_mesh_prims(stage: Usd.Stage) -> list[Usd.Prim]:
     return [p for p in Usd.PrimRange(root) if p.IsA(UsdGeom.Mesh)]
 
 
-def _fan_triangulate(face_vertex_counts, face_vertex_indices) -> np.ndarray:
+def _fan_triangulate(face_vertex_counts) -> np.ndarray:
     """Vectorized fan triangulation of (possibly n-gon) polygons.
+
+    Returns triangles as indices into the *face-vertex (corner)* arrays, so
+    the same triangles can index points, face-varying UVs and normals.
 
     Note: fan triangulation is only guaranteed correct for convex polygons;
     concave n-gons could triangulate with minor visual artifacts. Acceptable
     for this scan/CAD-style mesh.
     """
     counts = np.asarray(face_vertex_counts, dtype=np.int64)
-    indices = np.asarray(face_vertex_indices, dtype=np.int64)
     starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
     n_tris = np.maximum(counts - 2, 0)
     total = int(n_tris.sum())
     if total == 0:
-        return np.zeros((0, 3), dtype=np.int32)
+        return np.zeros((0, 3), dtype=np.int64)
 
     face_id = np.repeat(np.arange(len(counts)), n_tris)
     group_start = np.repeat(np.cumsum(n_tris) - n_tris, n_tris)
     local_t = np.arange(total) - group_start
 
     face_offset = starts[face_id]
-    v0 = indices[face_offset]
-    v1 = indices[face_offset + local_t + 1]
-    v2 = indices[face_offset + local_t + 2]
-    return np.stack([v0, v1, v2], axis=1).astype(np.int32)
+    return np.stack([face_offset, face_offset + local_t + 1, face_offset + local_t + 2], axis=1)
 
 
-def _local_to_world(points: np.ndarray, prim: Usd.Prim) -> np.ndarray:
+def _world_matrix(prim: Usd.Prim) -> np.ndarray:
     xformable = UsdGeom.Xformable(prim)
     mat4 = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    m = np.array(mat4, dtype=np.float64)  # row-vector convention: p' = [p,1] @ m
+    return np.array(mat4, dtype=np.float64)  # row-vector convention: p' = [p,1] @ m
+
+
+def _local_to_world(points: np.ndarray, m: np.ndarray) -> np.ndarray:
     homo = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
     return (homo @ m)[:, :3]
 
 
-def _average_uv_per_point(num_points, face_vertex_indices, flattened_uv) -> np.ndarray:
-    point_idx = np.asarray(face_vertex_indices, dtype=np.int64)
-    corner_uv = np.asarray(flattened_uv, dtype=np.float64)
-    sum_u = np.bincount(point_idx, weights=corner_uv[:, 0], minlength=num_points)
-    sum_v = np.bincount(point_idx, weights=corner_uv[:, 1], minlength=num_points)
-    count = np.bincount(point_idx, minlength=num_points)
-    count_safe = np.maximum(count, 1)
-    return np.stack([sum_u / count_safe, sum_v / count_safe], axis=1)
-
-
-def _voxel_cluster_decimate(vertices, faces, colors, voxel_size):
-    """Merge vertices that fall in the same voxel_size grid cell, remap
-    faces onto the merged vertices, and drop degenerate/duplicate faces.
-
-    A simple, dependency-free (numpy only) decimation — lower quality than
-    quadric edge-collapse, but adequate for an interactive viewer where the
-    exact silhouette detail matters less than staying responsive.
-    """
-    bbox_min = vertices.min(axis=0)
-    cell = np.floor((vertices - bbox_min) / voxel_size).astype(np.int64)
-    _, inverse, counts = np.unique(cell, axis=0, return_inverse=True, return_counts=True)
-    inverse = inverse.reshape(-1)
-    n_clusters = counts.shape[0]
-
-    sum_pos = np.zeros((n_clusters, 3), dtype=np.float64)
-    sum_col = np.zeros((n_clusters, 3), dtype=np.float64)
-    for a in range(3):
-        sum_pos[:, a] = np.bincount(inverse, weights=vertices[:, a].astype(np.float64), minlength=n_clusters)
-        sum_col[:, a] = np.bincount(inverse, weights=colors[:, a].astype(np.float64), minlength=n_clusters)
-    new_vertices = (sum_pos / counts[:, None]).astype(np.float32)
-    new_colors = np.clip(sum_col / counts[:, None], 0, 255).astype(np.uint8)
-
-    new_faces = inverse[faces]
-    degenerate = (
-        (new_faces[:, 0] == new_faces[:, 1])
-        | (new_faces[:, 1] == new_faces[:, 2])
-        | (new_faces[:, 0] == new_faces[:, 2])
-    )
-    new_faces = new_faces[~degenerate]
-    sorted_faces = np.sort(new_faces, axis=1)
-    _, unique_idx = np.unique(sorted_faces, axis=0, return_index=True)
-    new_faces = new_faces[np.sort(unique_idx)].astype(np.int32)
-
-    return new_vertices, new_faces, new_colors
-
-
-def _decimate_to_target(vertices, faces, colors, target_triangles):
-    if len(faces) <= target_triangles:
-        return vertices, faces, colors
-
-    bbox_diag = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
-    lo, hi = bbox_diag * 1e-4, bbox_diag * 0.25
-    best = (vertices, faces, colors)
-    for _ in range(10):
-        mid = (lo + hi) / 2.0
-        v2, f2, c2 = _voxel_cluster_decimate(vertices, faces, colors, mid)
-        n = len(f2)
-        best = (v2, f2, c2)
-        if n > target_triangles * 1.15:
-            lo = mid
-        elif n < target_triangles * 0.5:
-            hi = mid
-        else:
-            break
-    return best
+def _normals_to_world(normals: np.ndarray, m: np.ndarray) -> np.ndarray:
+    # Row-vector convention: normals transform by the inverse-transpose.
+    n = normals @ np.linalg.inv(m[:3, :3]).T
+    return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
 
 
 def _resolve_diffuse_source(prim: Usd.Prim):
@@ -190,39 +144,185 @@ def _resolve_diffuse_source(prim: Usd.Prim):
     return None, None
 
 
-def _load_texture_rgb(path: str) -> np.ndarray | None:
+def _extract_prim(prim: Usd.Prim, y_up: bool) -> dict:
+    """Triangulated, de-duplicated vertex data for one USD mesh, in world space."""
+    mesh = UsdGeom.Mesh(prim)
+    m = _world_matrix(prim)
+    points = _local_to_world(np.array(mesh.GetPointsAttr().Get(), dtype=np.float64), m)
+    fvi = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
+    corner_tris = _fan_triangulate(mesh.GetFaceVertexCountsAttr().Get())
+    if mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded:
+        corner_tris = corner_tris[:, ::-1]
+    n_corners = len(fvi)
+
+    # Per-corner UV (as an index into a UV table, so seams split vertices).
+    st = UsdGeom.PrimvarsAPI(prim).GetPrimvar("st")
+    if st and st.HasValue():
+        uv_table = np.array(st.Get(), dtype=np.float64)
+        interp = st.GetInterpolation()
+        idx = np.asarray(st.GetIndices(), dtype=np.int64) if st.IsIndexed() else None
+        if interp == UsdGeom.Tokens.faceVarying:
+            corner_uv = idx if idx is not None else np.arange(n_corners)
+        elif interp in (UsdGeom.Tokens.vertex, UsdGeom.Tokens.varying):
+            corner_uv = (idx if idx is not None else np.arange(len(points)))[fvi]
+        else:
+            uv_table, corner_uv = np.zeros((1, 2)), np.zeros(n_corners, dtype=np.int64)
+    else:
+        uv_table, corner_uv = np.zeros((1, 2)), np.zeros(n_corners, dtype=np.int64)
+
+    # Per-corner normal (fall back to face normals when absent).
+    normals_attr = mesh.GetNormalsAttr()
+    normals = np.array(normals_attr.Get(), dtype=np.float64) if normals_attr.HasValue() else None
+    if normals is not None and mesh.GetNormalsInterpolation() == UsdGeom.Tokens.faceVarying and len(normals) == n_corners:
+        corner_n = _normals_to_world(normals, m)
+    elif normals is not None and len(normals) == len(points):
+        corner_n = _normals_to_world(normals, m)[fvi]
+    else:
+        corner_n = None
+
+    if y_up:
+        # Rotate +90deg about X: (x, y, z) -> (x, -z, y), a proper rotation
+        # (determinant +1) that turns Y-up into Z-up.
+        flip = np.array([1, -1, 1])
+        points = points[:, [0, 2, 1]] * flip
+        if corner_n is not None:
+            corner_n = corner_n[:, [0, 2, 1]] * flip
+
+    used = corner_tris.reshape(-1)
+    if corner_n is None:
+        a, b, c = (points[fvi[corner_tris[:, k]]] for k in range(3))
+        fn = np.cross(b - a, c - a)
+        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-12)
+        corner_n = np.zeros((n_corners, 3))
+        corner_n[used] = np.repeat(fn, 3, axis=0)
+
+    # One output vertex per unique (point, uv, quantized normal) corner.
+    nq = np.round(corner_n[used] * _NORMAL_QUANT).astype(np.int64)
+    keys = np.column_stack([fvi[used], corner_uv[used], nq])
+    _, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    src = used[first]
+
+    return {
+        "name": prim.GetName(),
+        "positions": points[fvi[src]],
+        "normals": corner_n[src],
+        "uvs": uv_table[corner_uv[src]],
+        "indices": inverse.reshape(-1, 3).astype(np.uint32),
+        "unique_points": points[np.unique(fvi)],
+    }
+
+
+def _load_texture(path: str | None) -> bytes | None:
+    if not path:
+        return None
     try:
-        img = Image.open(path).convert("RGB")
-        return np.asarray(img)
+        img = Image.open(path)
+        img.load()
     except Exception as exc:  # noqa: BLE001 - defensive, e.g. unreadable EXR
         print(f"[mussel_loader] WARNING: could not decode texture '{path}' ({exc})", file=sys.stderr)
-        # Heuristic fallback: some filenames encode a flat color as hex, e.g. color_0C0C0C.exr
-        import re
-
-        m = re.search(r"([0-9A-Fa-f]{6})", os.path.basename(path))
-        if m:
-            rgb = tuple(int(m.group(1)[i : i + 2], 16) for i in (0, 2, 4))
-            print(f"[mussel_loader] falling back to flat color {rgb} parsed from filename", file=sys.stderr)
-            return np.array([[rgb]], dtype=np.uint8)
         return None
+    img = img.convert("RGB")
+    if max(img.size) > TEXTURE_MAX_SIZE:
+        img.thumbnail((TEXTURE_MAX_SIZE, TEXTURE_MAX_SIZE), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=TEXTURE_JPEG_QUALITY)
+    return buf.getvalue()
 
 
-def _sample_texture_colors(image_rgb: np.ndarray, uv: np.ndarray) -> np.ndarray:
-    h, w = image_rgb.shape[:2]
-    u = np.clip(uv[:, 0], 0.0, 1.0)
-    v = np.clip(uv[:, 1], 0.0, 1.0)
-    col = u * (w - 1)
-    row = (1.0 - v) * (h - 1) if FLIP_V else v * (h - 1)
-    coords = np.stack([row, col])
-    channels = [
-        map_coordinates(image_rgb[..., c].astype(np.float64), coords, order=1, mode="nearest")
-        for c in range(3)
-    ]
-    rgb = np.stack(channels, axis=1)
-    return np.clip(rgb, 0, 255).astype(np.uint8)
+def _write_glb(path: str, parts: list[dict], texture_jpeg: bytes | None, base_color) -> None:
+    """Minimal glTF 2.0 binary writer: one mesh, one primitive per USD prim,
+    one shared (optionally textured) PBR material."""
+    blob = bytearray()
+    buffer_views, accessors = [], []
+
+    def add_view(data: bytes, target=None) -> int:
+        while len(blob) % 4:
+            blob.append(0)
+        view = {"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)}
+        if target is not None:
+            view["target"] = target
+        blob.extend(data)
+        buffer_views.append(view)
+        return len(buffer_views) - 1
+
+    def add_accessor(arr: np.ndarray, gl_type: str, component: int, target: int, minmax=False) -> int:
+        acc = {
+            "bufferView": add_view(arr.tobytes(), target),
+            "componentType": component,
+            "count": int(arr.shape[0]),
+            "type": gl_type,
+        }
+        if minmax:
+            acc["min"] = arr.min(axis=0).tolist()
+            acc["max"] = arr.max(axis=0).tolist()
+        accessors.append(acc)
+        return len(accessors) - 1
+
+    FLOAT, UINT32, ARRAY, ELEMENTS = 5126, 5125, 34962, 34963
+    primitives = []
+    for part in parts:
+        uvs = part["uvs"].astype(np.float32)
+        if FLIP_V:
+            uvs[:, 1] = 1.0 - uvs[:, 1]
+        attributes = {
+            "POSITION": add_accessor(part["positions"].astype(np.float32), "VEC3", FLOAT, ARRAY, minmax=True),
+            "NORMAL": add_accessor(part["normals"].astype(np.float32), "VEC3", FLOAT, ARRAY),
+        }
+        if texture_jpeg is not None:
+            attributes["TEXCOORD_0"] = add_accessor(uvs, "VEC2", FLOAT, ARRAY)
+        primitives.append({
+            "attributes": attributes,
+            "indices": add_accessor(part["indices"].reshape(-1), "SCALAR", UINT32, ELEMENTS),
+            "material": 0,
+            "extras": {"name": part["name"]},
+        })
+
+    pbr = {"baseColorFactor": [*base_color, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.6}
+    gltf = {
+        "asset": {"version": "2.0", "generator": "Mussel-Visualizer mussel_loader.py"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "Mussel", "mesh": 0}],
+        "meshes": [{"name": "Mussel", "primitives": primitives}],
+        "materials": [{"name": "mussel", "pbrMetallicRoughness": pbr, "doubleSided": True}],
+    }
+    if texture_jpeg is not None:
+        gltf["images"] = [{"bufferView": add_view(texture_jpeg), "mimeType": "image/jpeg"}]
+        gltf["samplers"] = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]
+        gltf["textures"] = [{"sampler": 0, "source": 0}]
+        pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
+        pbr["baseColorTexture"] = {"index": 0}
+    while len(blob) % 4:
+        blob.append(0)
+    gltf["buffers"] = [{"byteLength": len(blob)}]
+    gltf["bufferViews"] = buffer_views
+    gltf["accessors"] = accessors
+
+    json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_bytes += b" " * ((4 - len(json_bytes) % 4) % 4)
+    total = 12 + 8 + len(json_bytes) + 8 + len(blob)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<III", 0x46546C67, 2, total))
+        f.write(struct.pack("<II", len(json_bytes), 0x4E4F534A))
+        f.write(json_bytes)
+        f.write(struct.pack("<II", len(blob), 0x004E4942))
+        f.write(blob)
 
 
-def extract_mesh_from_usd(usd_path: str = USD_PATH) -> MeshData:
+def _support_points(hull_points: np.ndarray, n_directions: int = SUPPORT_DIRECTIONS) -> np.ndarray:
+    """Thin a (smooth, very dense) convex hull down to the extreme points
+    along a Fibonacci-sphere set of directions. The lowest/highest point
+    after any rotation is then within ~radius * spacing^2 / 2 of exact.
+    """
+    i = np.arange(n_directions) + 0.5
+    z = 1.0 - 2.0 * i / n_directions
+    phi = np.pi * (1.0 + 5**0.5) * i
+    r = np.sqrt(1.0 - z * z)
+    dirs = np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=1)
+    return hull_points[np.unique(np.argmax(hull_points @ dirs.T, axis=0))]
+
+
+def convert(usd_path: str = USD_PATH, glb_path: str = GLB_PATH, meta_path: str = META_PATH) -> None:
     stage = Usd.Stage.Open(usd_path)
     if stage is None:
         raise FileNotFoundError(f"Could not open USD stage: {usd_path}")
@@ -235,132 +335,61 @@ def extract_mesh_from_usd(usd_path: str = USD_PATH) -> MeshData:
     if not mesh_prims:
         raise RuntimeError(f"No UsdGeom.Mesh prims found under {MUSSEL_ROOT_PATH}")
 
-    texture_cache: dict[str, np.ndarray] = {}
+    parts = [_extract_prim(p, y_up=(up_axis == "Y")) for p in mesh_prims]
+    for p, part in zip(mesh_prims, parts):
+        print(f"[mussel_loader]   {p.GetPath()}: vertices={len(part['positions'])} triangles={len(part['indices'])}")
 
-    all_points = []
-    all_faces = []
-    all_colors = []
-    offset = 0
-
+    # The viewer uses a single material; take it from the first prim that has one.
+    texture_jpeg, base_color = None, _FALLBACK_COLOR
     for prim in mesh_prims:
-        mesh = UsdGeom.Mesh(prim)
-        points_local = np.array(mesh.GetPointsAttr().Get(), dtype=np.float64)
-        fvc = mesh.GetFaceVertexCountsAttr().Get()
-        fvi = mesh.GetFaceVertexIndicesAttr().Get()
-
-        points_world = _local_to_world(points_local, prim)
-        faces_local = _fan_triangulate(fvc, fvi)
-
-        primvars_api = UsdGeom.PrimvarsAPI(prim)
-        uv_primvar = primvars_api.GetPrimvar("st")
-        if uv_primvar is None or not uv_primvar.HasValue():
-            uv_primvar = primvars_api.FindPrimvarWithInheritance("st")
-
-        if uv_primvar is not None and uv_primvar.HasValue():
-            flattened_uv = uv_primvar.ComputeFlattened()
-            uv_per_point = _average_uv_per_point(len(points_local), fvi, flattened_uv)
-        else:
-            uv_per_point = None
-
         kind, value = _resolve_diffuse_source(prim)
         if kind == "texture":
-            if value not in texture_cache:
-                loaded = _load_texture_rgb(value)
-                texture_cache[value] = loaded
-            texture_rgb = texture_cache[value]
-            if texture_rgb is not None and uv_per_point is not None:
-                colors = _sample_texture_colors(texture_rgb, uv_per_point)
-            else:
-                colors = np.tile(_FALLBACK_COLOR, (len(points_local), 1))
+            texture_jpeg = _load_texture(value)
+            if texture_jpeg is not None:
+                break
         elif kind == "color":
-            rgb = tuple(int(round(np.clip(c, 0, 1) * 255)) for c in value)
-            colors = np.tile(np.array(rgb, dtype=np.uint8), (len(points_local), 1))
-        else:
-            colors = np.tile(_FALLBACK_COLOR, (len(points_local), 1))
+            base_color = value
+            break
 
-        print(
-            f"[mussel_loader]   {prim.GetPath()}: points={len(points_local)} "
-            f"triangles={len(faces_local)} material_source={kind or 'none'}"
+    # Re-center on the bounding-box center so the glTF node's origin is the
+    # mussel's rest-pose center (the pivot for all rotations).
+    all_points = np.concatenate([part["unique_points"] for part in parts])
+    rest_center = (all_points.min(axis=0) + all_points.max(axis=0)) / 2.0
+    for part in parts:
+        part["positions"] = part["positions"] - rest_center
+    centered = all_points - rest_center
+
+    hull = _support_points(centered[ConvexHull(centered).vertices])
+    bounding_radius = float(np.linalg.norm(centered, axis=1).max())
+
+    os.makedirs(os.path.dirname(glb_path), exist_ok=True)
+    _write_glb(glb_path, parts, texture_jpeg, base_color)
+    with open(meta_path, "w") as f:
+        json.dump(
+            {
+                "bounding_radius": bounding_radius,
+                "rest_center": rest_center.tolist(),
+                "hull": np.round(hull, 6).tolist(),
+            },
+            f,
         )
-        if uv_per_point is not None and len(uv_per_point):
-            sample_n = min(3, len(uv_per_point))
-            for i in range(sample_n):
-                print(f"[mussel_loader]     sample uv={uv_per_point[i]} -> rgb={colors[i]}")
 
-        all_points.append(points_world)
-        all_faces.append(faces_local + offset)
-        all_colors.append(colors)
-        offset += len(points_local)
-
-    vertices = np.concatenate(all_points, axis=0).astype(np.float32)
-    faces = np.concatenate(all_faces, axis=0).astype(np.int32)
-    vertex_colors = np.concatenate(all_colors, axis=0).astype(np.uint8)
-
-    if up_axis == "Y":
-        # Rotate +90deg about X: (x, y, z) -> (x, -z, y), a proper rotation
-        # (determinant +1) that turns Y-up into Z-up.
-        vertices = vertices[:, [0, 2, 1]] * np.array([1, -1, 1], dtype=np.float32)
-        print("[mussel_loader] applied Y-up -> Z-up reorientation")
-
-    print(f"[mussel_loader] TOTAL (pre-decimation) vertices={len(vertices)} triangles={len(faces)}")
-    if len(faces) > DECIMATE_THRESHOLD_TRIANGLES:
-        print(
-            f"[mussel_loader] triangle count ({len(faces)}) exceeds "
-            f"{DECIMATE_THRESHOLD_TRIANGLES} — decimating toward "
-            f"{DECIMATE_TARGET_TRIANGLES} triangles for interactive performance.",
-        )
-        vertices, faces, vertex_colors = _decimate_to_target(
-            vertices, faces, vertex_colors, DECIMATE_TARGET_TRIANGLES
-        )
-        print(f"[mussel_loader] TOTAL (post-decimation) vertices={len(vertices)} triangles={len(faces)}")
-
-    rest_centroid = vertices.mean(axis=0)
-    bounding_radius = float(np.linalg.norm(vertices - rest_centroid, axis=1).max())
-    print(f"[mussel_loader] rest_centroid={rest_centroid} bounding_radius={bounding_radius:.4f}")
-
-    return MeshData(
-        vertices=vertices,
-        faces=faces,
-        vertex_colors=vertex_colors,
-        rest_centroid=rest_centroid.astype(np.float32),
-        bounding_radius=bounding_radius,
+    n_tris = sum(len(p["indices"]) for p in parts)
+    print(
+        f"[mussel_loader] wrote {glb_path} ({os.path.getsize(glb_path) / 1e6:.1f} MB, "
+        f"{n_tris} triangles, texture={'yes' if texture_jpeg else 'no'})"
     )
+    print(f"[mussel_loader] wrote {meta_path} (hull points={len(hull)}, bounding_radius={bounding_radius:.4f})")
 
 
-def save_cache(mesh_data: MeshData, cache_path: str = CACHE_PATH) -> None:
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    np.savez(
-        cache_path,
-        vertices=mesh_data.vertices,
-        faces=mesh_data.faces,
-        vertex_colors=mesh_data.vertex_colors,
-        rest_centroid=mesh_data.rest_centroid,
-        bounding_radius=np.float32(mesh_data.bounding_radius),
-    )
-    print(f"[mussel_loader] wrote cache to {cache_path}")
+def assets_exist() -> bool:
+    return os.path.exists(GLB_PATH) and os.path.exists(META_PATH)
 
 
-def load_mesh(force_reconvert: bool = False, usd_path: str = USD_PATH, cache_path: str = CACHE_PATH) -> MeshData:
-    if not force_reconvert and os.path.exists(cache_path):
-        data = np.load(cache_path)
-        return MeshData(
-            vertices=data["vertices"],
-            faces=data["faces"],
-            vertex_colors=data["vertex_colors"],
-            rest_centroid=data["rest_centroid"],
-            bounding_radius=float(data["bounding_radius"]),
-        )
-    mesh_data = extract_mesh_from_usd(usd_path)
-    save_cache(mesh_data, cache_path)
-    return mesh_data
+def ensure_assets() -> None:
+    if not assets_exist():
+        convert()
 
 
 if __name__ == "__main__":
-    mesh_data = load_mesh(force_reconvert=True)
-    print("vertices dtype/shape:", mesh_data.vertices.dtype, mesh_data.vertices.shape)
-    print("faces dtype/shape:", mesh_data.faces.dtype, mesh_data.faces.shape)
-    print("vertex_colors dtype/shape:", mesh_data.vertex_colors.dtype, mesh_data.vertex_colors.shape)
-    assert mesh_data.faces.shape[1] == 3
-    assert mesh_data.vertex_colors.dtype == np.uint8
-    assert mesh_data.vertex_colors.shape == mesh_data.vertices.shape
-    print("OK")
+    convert()
