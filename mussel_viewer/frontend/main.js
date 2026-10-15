@@ -70,6 +70,7 @@ scene.add(sun, sun.target);
 // Substrate: fixed forever at z = 0. Only the mussel moves.
 const substrateMaterial = new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0 });
 const substrate = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), substrateMaterial);
+const substrateImage = { url: null, aspect: 1 };
 substrate.receiveShadow = true;
 scene.add(substrate);
 
@@ -204,16 +205,7 @@ function syncSliders() {
 }
 
 function updateReadout() {
-  const { yaw, pitch, roll } = eulerDeg();
-  const q = state.quaternion;
-  $("r-yaw").textContent = `${yaw.toFixed(1)}°`;
-  $("r-pitch").textContent = `${pitch.toFixed(1)}°`;
-  $("r-roll").textContent = `${roll.toFixed(1)}°`;
-  const f = (v) => (v < 0 ? "" : " ") + v.toFixed(3);
-  $("r-quat").textContent = `w ${f(q.w)}  x ${f(q.x)}\ny ${f(q.y)}  z ${f(q.z)}`;
-  $("r-height").textContent = state.height.toFixed(2);
-  $("r-burial").textContent = `${Math.round(Math.abs(state.height) * 100)}%`;
-  $("gimbal").hidden = Math.abs(pitch) < GIMBAL_WARN_DEG;
+  $("gimbal").hidden = Math.abs(eulerDeg().pitch) < GIMBAL_WARN_DEG;
 }
 
 $("reset").addEventListener("click", () => {
@@ -300,9 +292,8 @@ function applyConfig(config, radius) {
   camera.lookAt(target);
   camera.updateProjectionMatrix();
 
-  const size = 2 * (config.substrate_size_scale ?? 2.2) * radius;
-  substrate.scale.set(size, size, 1);
-  substrateMaterial.color.set(config.substrate_color || "#C2B280");
+  state.substrateSize = 2 * (config.substrate_size_scale ?? 2.2) * radius;
+  applySubstrate(config);
   const background = config.background_color || "#FFFFFF";
   scene.background = new THREE.Color(background);
   document.documentElement.style.setProperty("--bg", background);
@@ -317,6 +308,47 @@ function applyConfig(config, radius) {
   sc.updateProjectionMatrix();
 
   axes.scale.setScalar(radius * 0.8);
+  requestRender();
+}
+
+// Substrate: a solid color, or one image stretched over the whole plane (no
+// tiling). The image arrives as a data URL; it is only decoded when it changes.
+const textureLoader = new THREE.TextureLoader();
+
+function applySubstrate(config) {
+  const url = config.substrate_image_url || null;
+  if (url !== substrateImage.url) {
+    substrateImage.url = url;
+    if (substrateMaterial.map) substrateMaterial.map.dispose();
+    substrateMaterial.map = null;
+    substrateImage.aspect = 1;
+    if (url) {
+      textureLoader.load(url, (texture) => {
+        if (substrateImage.url !== url) return texture.dispose(); // superseded
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        // The camera looks from the plane's +y side, where the image's top
+        // edge would land. Rotate (not mirror) it so the top is the far side.
+        texture.center.set(0.5, 0.5);
+        texture.rotation = Math.PI;
+        substrateMaterial.map = texture;
+        substrateImage.aspect = texture.image.width / texture.image.height;
+        substrateMaterial.needsUpdate = true;
+        sizeSubstrate();
+      });
+    }
+    substrateMaterial.needsUpdate = true;
+  }
+  // The map is multiplied by the color, so use white to show the image as is.
+  substrateMaterial.color.set(url ? "#FFFFFF" : config.substrate_color || "#C2B280");
+  sizeSubstrate();
+}
+
+/** Longest side = substrate size; the other follows the image's aspect ratio. */
+function sizeSubstrate() {
+  const size = state.substrateSize;
+  const aspect = substrateImage.aspect;
+  substrate.scale.set(aspect >= 1 ? size : size * aspect, aspect >= 1 ? size / aspect : size, 1);
   requestRender();
 }
 
@@ -356,6 +388,10 @@ window.addEventListener("message", (event) => {
   if (event.data?.type !== "streamlit:render") return;
   const args = event.data.args || {};
   document.documentElement.style.setProperty("--viewer-height", `${args.height ?? 640}px`);
+  // With an aspect ratio (the reference image's), the canvas matches it and the
+  // controls stack below; otherwise the canvas fills the fixed height.
+  if (args.aspect) document.documentElement.style.setProperty("--view-aspect", String(args.aspect));
+  $("root").classList.toggle("stacked", Boolean(args.aspect));
   state.config = args.config || {};
   if (!state.initialized) {
     state.initialized = true;

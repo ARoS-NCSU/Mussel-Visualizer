@@ -28,6 +28,7 @@ def mussel_viewer(
     render_config: dict,
     initial_pose: dict | None = None,
     height: int = 640,
+    aspect: float | None = None,
     key: str | None = None,
 ) -> dict | None:
     """Render the interactive viewer and return the last committed pose.
@@ -39,12 +40,16 @@ def mussel_viewer(
 
     ``initial_pose`` is applied only when the viewer first loads; after that
     the viewer owns the pose, so Streamlit reruns never reset it.
+
+    ``aspect`` (width / height), when given, sizes the 3D view to that aspect
+    ratio and places the controls below it; ``height`` is then ignored.
     """
     asset_version = str(int(os.path.getmtime(_GLB_PATH))) if os.path.exists(_GLB_PATH) else ""
     return _component(
         config=render_config,
         initial_pose=initial_pose,
         height=height,
+        aspect=aspect,
         asset_version=asset_version,
         key=key,
         default=None,

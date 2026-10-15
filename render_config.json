@@ -1,9 +1,12 @@
 {
+  "image_file": "sample_image.jpg",
   "camera": {
     "elevation_deg": 25.0,
     "azimuth_deg": 45.0,
     "distance_scale": 1.0
   },
+  "substrate_mode": "image",
+  "substrate_image": "sample_substrate2.jpg",
   "substrate_color": "#C2B280",
   "background_color": "#FFFFFF",
   "substrate_size_scale": 2.2,

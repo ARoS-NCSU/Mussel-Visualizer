@@ -13,10 +13,10 @@ how deeply it is buried. The substrate and camera never move.
 - **Burial "Height"** slider from `0` (resting on top of the substrate) to
   `-1` (fully buried). At any orientation, height `0` means the mussel's
   lowest point touches the substrate.
-- **Live pose readout** in the viewer: Euler angles, quaternion, height, burial %.
-- **Committed pose in Python**: when you release the mouse or a slider, the
-  pose is sent to Streamlit, which shows it along with the rotation matrix
-  and a JSON download.
+- **Reference image side by side**: the underwater camera image set by
+  `image_file` is shown on the left, and the 3D view on the right uses the
+  same aspect ratio so the two can be matched.
+- Substrate as a solid color or as an image (e.g. a photo of the sediment).
 - Options for a see-through substrate (to see the buried part) and the
   mussel's body axes.
 - Full-resolution mesh (~714k triangles) with the real texture.
@@ -94,7 +94,7 @@ mussel_viewer/__init__.py    Streamlit component wrapper: mussel_viewer(...) -> 
 mussel_viewer/frontend/      three.js viewer (plain HTML/JS/CSS, no build step)
   assets/                    Generated GLB + metadata (committed; regenerate with mussel_loader.py)
 geometry.py                  Python pose helpers (quaternion/Euler -> rotation matrix)
-app.py                       Streamlit entrypoint: viewer + committed-pose panel
+app.py                       Streamlit entrypoint: camera image + viewer
 render_config.json           Camera + color configuration (see below)
 requirements.txt
 ```
@@ -105,11 +105,14 @@ Controls the fixed camera view, the scene's colors and the viewer size.
 
 ```json
 {
+  "image_file": "sample_image.jpg",
   "camera": {
     "elevation_deg": 25.0,
     "azimuth_deg": 45.0,
     "distance_scale": 1.0
   },
+  "substrate_mode": "image",
+  "substrate_image": "sample_substrate.jpg",
   "substrate_color": "#C2B280",
   "background_color": "#FFFFFF",
   "substrate_size_scale": 2.2,
@@ -119,14 +122,17 @@ Controls the fixed camera view, the scene's colors and the viewer size.
 
 | Field | Description |
 |---|---|
+| `image_file` | Camera image shown on the left, relative to the project folder. The 3D view takes its aspect ratio. |
 | `camera.elevation_deg` | Camera angle above the substrate plane, in degrees. |
 | `camera.azimuth_deg` | Camera angle around the vertical axis, in degrees. |
 | `camera.distance_scale` | Multiplier on the default camera distance (6.8 × the mussel's bounding radius). |
 | `camera.target` | Optional `[x, y, z]` point the camera looks at (default `[0, 0, 0]`). |
-| `substrate_color` | Hex color of the substrate ("sand") plane. |
+| `substrate_mode` | `"color"` for a solid `substrate_color`, or `"image"` to cover the substrate with `substrate_image`. |
+| `substrate_image` | Image stretched once over the substrate plane (no tiling), relative to the project folder. The plane takes the image's aspect ratio. Used when `substrate_mode` is `"image"`; if the file is missing, the app warns and uses the color. |
+| `substrate_color` | Hex color of the substrate ("sand") plane in `"color"` mode. |
 | `background_color` | Hex color of the scene background. |
-| `substrate_size_scale` | Half-width of the substrate plane, relative to the mussel's bounding radius. |
-| `viewer_height` | Height of the viewer in pixels. |
+| `substrate_size_scale` | Half-width of the substrate plane (its longer side, for an image), relative to the mussel's bounding radius. |
+| `viewer_height` | Height of the viewer in pixels, used only when no image is shown. |
 
 Edit this file and reload the app in your browser to see the changes. The
 current pose is kept.
