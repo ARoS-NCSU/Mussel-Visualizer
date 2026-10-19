@@ -40,6 +40,12 @@ const state = {
   height: 0, // 0 = resting on the substrate, -1 = fully buried
   hull: null, // Float32Array of xyz, mussel frame
   zRange: 0,
+  modelLoaded: false,
+  // Identifies what is being posed (the Zooniverse subject id). When Python
+  // sends a new token, the pose resets to initialPose; the token is echoed in
+  // every committed pose so Python can tell stale poses apart.
+  poseToken: null,
+  initialPose: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +164,7 @@ function currentPose() {
     roll: round(roll, 3),
     quaternion: { w: round(q.w, 6), x: round(q.x, 6), y: round(q.y, 6), z: round(q.z, 6) },
     height: round(state.height, 4),
+    token: state.poseToken,
   };
 }
 
@@ -352,6 +359,15 @@ function sizeSubstrate() {
   requestRender();
 }
 
+function resetPose(pose) {
+  state.height = Math.min(0, Math.max(-1, pose.height ?? 0));
+  const q = pose.quaternion;
+  if (q) state.quaternion.set(q.x, q.y, q.z, q.w).normalize();
+  else state.quaternion.setFromEuler(new THREE.Euler((pose.roll ?? 0) * DEG, (pose.pitch ?? 0) * DEG, (pose.yaw ?? 0) * DEG, "ZYX"));
+  applyPose();
+  syncSliders();
+}
+
 async function init(args) {
   const version = encodeURIComponent(args.asset_version ?? "");
   const status = $("status");
@@ -369,13 +385,9 @@ async function init(args) {
     });
     mussel.add(gltf.scene);
 
-    const pose = args.initial_pose || {};
-    state.height = Math.min(0, Math.max(-1, pose.height ?? 0));
-    const q = pose.quaternion;
-    if (q) state.quaternion.set(q.x, q.y, q.z, q.w).normalize();
-    else setFromEuler(pose.yaw ?? 0, pose.pitch ?? 0, pose.roll ?? 0);
-    applyPose();
-    syncSliders();
+    state.modelLoaded = true;
+    // The latest initial pose: the token may have changed while loading.
+    resetPose(state.initialPose);
     status.hidden = true;
   } catch (err) {
     console.error(err);
@@ -393,6 +405,12 @@ window.addEventListener("message", (event) => {
   if (args.aspect) document.documentElement.style.setProperty("--view-aspect", String(args.aspect));
   $("root").classList.toggle("stacked", Boolean(args.aspect));
   state.config = args.config || {};
+  const token = args.pose_token ?? null;
+  if (!state.initialized || token !== state.poseToken) {
+    state.poseToken = token;
+    state.initialPose = args.initial_pose || {};
+    if (state.modelLoaded) resetPose(state.initialPose);
+  }
   if (!state.initialized) {
     state.initialized = true;
     init(args);

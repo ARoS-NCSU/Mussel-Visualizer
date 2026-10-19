@@ -29,17 +29,22 @@ def mussel_viewer(
     initial_pose: dict | None = None,
     height: int = 640,
     aspect: float | None = None,
+    pose_token: str | None = None,
     key: str | None = None,
 ) -> dict | None:
     """Render the interactive viewer and return the last committed pose.
 
     The pose is ``{"yaw", "pitch", "roll", "quaternion": {"w","x","y","z"},
-    "height"}`` (angles in degrees, ZYX Euler convention; height in [-1, 0]).
-    It is updated when a drag or slider interaction ends, and is ``None``
-    until the first interaction.
+    "height", "token"}`` (angles in degrees, ZYX Euler convention; height in
+    [-1, 0]). It is updated when a drag or slider interaction ends, and is
+    ``None`` until the first interaction. It persists across reruns.
 
-    ``initial_pose`` is applied only when the viewer first loads; after that
-    the viewer owns the pose, so Streamlit reruns never reset it.
+    ``initial_pose`` is applied when the viewer first loads and whenever
+    ``pose_token`` changes; otherwise the viewer owns the pose, so Streamlit
+    reruns never reset it. ``token`` in the returned pose is the
+    ``pose_token`` that was active when it was committed: a pose whose token
+    differs from the current one is stale (from an earlier subject). Keep the
+    same ``key`` when the token changes so the model is not reloaded.
 
     ``aspect`` (width / height), when given, sizes the 3D view to that aspect
     ratio and places the controls below it; ``height`` is then ignored.
@@ -50,6 +55,7 @@ def mussel_viewer(
         initial_pose=initial_pose,
         height=height,
         aspect=aspect,
+        pose_token=pose_token,
         asset_version=asset_version,
         key=key,
         default=None,

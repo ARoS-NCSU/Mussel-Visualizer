@@ -1,4 +1,5 @@
 {
+  "mode": "zooniverse",
   "image_file": "sample_image.jpg",
   "camera": {
     "elevation_deg": 25.0,

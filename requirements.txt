@@ -3,3 +3,5 @@ scipy>=1.11,<2
 Pillow>=10,<12
 usd-core==26.8
 streamlit>=1.38,<2
+requests>=2.31,<3
+pytest>=8,<10

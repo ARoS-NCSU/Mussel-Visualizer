@@ -13,6 +13,9 @@ how deeply it is buried. The substrate and camera never move.
 - **Burial "Height"** slider from `0` (resting on top of the substrate) to
   `-1` (fully buried). At any orientation, height `0` means the mussel's
   lowest point touches the substrate.
+- **Zooniverse integration**: volunteers get images from the Bionic Mussels
+  workflow, optionally sign in with their Zooniverse account, and submit the
+  pose as a classification (see [Zooniverse mode](#zooniverse-mode)).
 - **Reference image side by side**: the underwater camera image set by
   `image_file` is shown on the left, and the 3D view on the right uses the
   same aspect ratio so the two can be matched.
@@ -94,8 +97,11 @@ mussel_viewer/__init__.py    Streamlit component wrapper: mussel_viewer(...) -> 
 mussel_viewer/frontend/      three.js viewer (plain HTML/JS/CSS, no build step)
   assets/                    Generated GLB + metadata (committed; regenerate with mussel_loader.py)
 geometry.py                  Python pose helpers (quaternion/Euler -> rotation matrix)
-app.py                       Streamlit entrypoint: camera image + viewer
-render_config.json           Camera + color configuration (see below)
+app.py                       Streamlit entrypoint: camera image + viewer (local or Zooniverse mode)
+zooniverse.py                Panoptes HTTP client: OAuth, subjects, classifications
+render_config.json           Mode, camera + color configuration (see below)
+.streamlit/secrets.toml.example  Template for the Zooniverse secrets
+tests/                       Unit tests (pytest, no network)
 requirements.txt
 ```
 
@@ -105,6 +111,7 @@ Controls the fixed camera view, the scene's colors and the viewer size.
 
 ```json
 {
+  "mode": "zooniverse",
   "image_file": "sample_image.jpg",
   "camera": {
     "elevation_deg": 25.0,
@@ -122,6 +129,7 @@ Controls the fixed camera view, the scene's colors and the viewer size.
 
 | Field | Description |
 |---|---|
+| `mode` | `"zooniverse"` (default): use Zooniverse when its secrets are set, otherwise fall back to local mode. `"local"`: always use `image_file`, even when Zooniverse secrets exist. |
 | `image_file` | Camera image shown on the left, relative to the project folder. The 3D view takes its aspect ratio. |
 | `camera.elevation_deg` | Camera angle above the substrate plane, in degrees. |
 | `camera.azimuth_deg` | Camera angle around the vertical axis, in degrees. |
@@ -139,16 +147,116 @@ current pose is kept.
 
 ## Using the pose in Python
 
-`mussel_viewer(...)` returns the last committed pose:
+`mussel_viewer(...)` returns the last committed pose, or `None` before the
+first interaction:
 
 ```python
 {"yaw": 12.5, "pitch": -3.0, "roll": 40.0,
  "quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
- "height": -0.25}
+ "height": -0.25, "token": "117025476"}
 ```
+
+The returned value persists across reruns. To pose several things with one
+viewer, pass `pose_token` (the app uses the Zooniverse subject id): when it
+changes, the viewer resets to `initial_pose` without reloading the model.
+`token` in the result is the `pose_token` that was active when the pose was
+committed, so a pose whose `token` differs from the current one is stale.
+Keep the same component `key` across tokens.
 
 `geometry.rotation_matrix(pose)` turns it into a 3×3 matrix whose columns are
 the mussel's body axes expressed in world coordinates.
+
+## Zooniverse mode
+
+With Zooniverse secrets configured (and `mode` left at `"zooniverse"`), the app
+becomes a custom front end for the
+[Bionic Mussels](https://www.zooniverse.org/projects/coopsciscoop/bionic-mussels)
+project:
+
+1. It fetches the next subject of the workflow from the Panoptes API and shows
+   its image on the left. Each subject starts from the default pose.
+2. Volunteers can **Log in with Zooniverse** (it opens in a new tab and returns
+   there signed in) or classify as guests. Sign-in lasts for the browser
+   session; refreshing the page or an expired token signs the volunteer out.
+3. **Submit** sends the pose as a classification and loads the next subject.
+   It is enabled once the mussel has been moved for the current subject.
+   **Done & Talk** also submits and then offers a link to the subject's Talk
+   page; **Skip** moves on without classifying.
+
+Without the secrets, or with `"mode": "local"`, the app shows `image_file` and
+submits nothing (local mode).
+
+### Secrets
+
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill
+it in (the file is git-ignored; never commit it):
+
+```toml
+[zooniverse_oauth]
+client_id = "..."
+client_secret = "..."
+redirect_uri = "http://localhost:8501"
+
+[zooniverse]
+project_id = 31635
+workflow_id = 31559
+# project_slug = "coopsciscoop/bionic-mussels"   # optional, for Talk links
+```
+
+On Streamlit Community Cloud, paste the same content in the app's
+**Settings → Secrets**, with `redirect_uri` set to the app's
+`https://….streamlit.app/` URL.
+
+`[zooniverse]` alone enables Zooniverse mode for guests; `[zooniverse_oauth]`
+adds sign-in. The `redirect_uri` must match one of the Redirect URIs of the
+OAuth application on Zooniverse **exactly** (scheme, host, port and trailing
+slash), or Zooniverse rejects the sign-in.
+
+### Classification format
+
+Each classification has one annotation for task `T0` whose value is the pose
+(an object, not an answer index, so analyze it from the raw classification
+export rather than with Zooniverse's aggregation tools):
+
+```json
+{
+  "annotations": [{"task": "T0", "value": {
+    "quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
+    "yaw": 12.5, "pitch": -3.0, "roll": 40.0, "height": -0.25}}],
+  "metadata": {
+    "workflow_version": "2.5",
+    "started_at": "…", "finished_at": "…",
+    "user_language": "en", "utc_offset": "0",
+    "user_agent": "Mussel-Visualizer/1.0 (Streamlit)",
+    "source": "mussel-visualizer",
+    "subject_dimensions": [{"naturalWidth": 1920, "naturalHeight": 1080,
+                            "clientWidth": null, "clientHeight": null}],
+    "pose_convention": "intrinsic ZYX Euler (deg); quaternion is authoritative; height in [-1, 0]",
+    "camera": {"elevation_deg": 25.0, "azimuth_deg": 45.0, "distance_scale": 1.0}
+  },
+  "links": {"project": "31635", "workflow": "31559", "subjects": ["117025476"]},
+  "completed": true
+}
+```
+
+`workflow_version` is read from the API when the session starts. `camera` is
+the camera used while posing (from `render_config.json`), so the pose can be
+interpreted even if the configuration changes later.
+
+### Known limitations
+
+- The OAuth flow does not use a `state` parameter (the sign-in returns in a
+  new browser session, so there is nowhere to keep it).
+- In the project's development mode subjects never retire, and guests get
+  random subjects; the app avoids repeating subjects within a session only.
+
+### Tests
+
+```bash
+python -m pytest
+```
+
+The tests mock all HTTP calls, so they need no network or secrets.
 
 ## License
 
