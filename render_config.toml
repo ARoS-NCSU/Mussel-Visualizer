@@ -1,0 +1,41 @@
+# Mussel 3D Visualizer configuration. Edit and reload the page in the browser
+# to apply changes (the current pose is kept).
+
+# Where the image on the left comes from:
+#   "zooniverse" (default): the next subject of the Zooniverse workflow when the
+#                [zooniverse] secrets are set; otherwise falls back to "local".
+#   "local":     always show image_file and submit nothing.
+mode = "zooniverse"
+
+# Camera image shown in local mode, relative to the project folder. The 3D view
+# takes its aspect ratio.
+image_file = "sample_image.jpg"
+
+# Substrate (the "sand" plane):
+#   "color": a solid substrate_color.
+#   "image": substrate_image stretched once over the plane (no tiling). If the
+#            file is missing, the app warns and uses substrate_color.
+substrate_mode = "image"
+substrate_image = "sample_substrate2.jpg"
+substrate_color = "#C2B280"
+# Half-width of the substrate plane (its longer side, for an image), relative
+# to the mussel's bounding radius.
+substrate_size_scale = 2.2
+
+# Scene background color.
+background_color = "#FFFFFF"
+
+# Height of the viewer in pixels; only used when no image is shown (otherwise
+# the 3D view matches the image's aspect ratio).
+viewer_height = 640
+
+# Fixed camera; the mussel moves, the camera never does.
+[camera]
+# Angle above the substrate plane, in degrees.
+elevation_deg = 25.0
+# Angle around the vertical axis, in degrees.
+azimuth_deg = 45.0
+# Multiplier on the default distance (6.8 x the mussel's bounding radius).
+distance_scale = 1.0
+# Optional point the camera looks at (default [0, 0, 0]).
+# target = [0.0, 0.0, 0.0]

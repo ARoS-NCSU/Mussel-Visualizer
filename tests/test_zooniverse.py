@@ -135,18 +135,7 @@ def test_create_classification_payload(http):
     assert (method, url) == ("POST", f"{zooniverse.PANOPTES_URL}/api/classifications")
     assert http.call_args.kwargs["json"] == {
         "classifications": {
-            "annotations": [
-                {
-                    "task": "T0",
-                    "value": {
-                        "quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
-                        "yaw": 12.5,
-                        "pitch": -3.0,
-                        "roll": 40.0,
-                        "height": -0.25,
-                    },
-                }
-            ],
+            "annotations": [{"task": "T0", "value": 0}],
             "metadata": {
                 "workflow_version": "2.5",
                 "started_at": "2026-10-19T12:00:00+00:00",
@@ -158,6 +147,13 @@ def test_create_classification_payload(http):
                 "subject_dimensions": [
                     {"naturalWidth": 1920, "naturalHeight": 1080, "clientWidth": None, "clientHeight": None}
                 ],
+                "pose": {
+                    "quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
+                    "yaw": 12.5,
+                    "pitch": -3.0,
+                    "roll": 40.0,
+                    "height": -0.25,
+                },
                 "pose_convention": "intrinsic ZYX Euler (deg); quaternion is authoritative; height in [-1, 0]",
                 "camera": {"elevation_deg": 25.0, "azimuth_deg": 45.0, "distance_scale": 1.0},
             },

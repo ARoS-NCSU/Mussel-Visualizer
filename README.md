@@ -5,6 +5,12 @@ mussel model resting on, or partially buried in, a flat substrate ("sand").
 Drag the mussel to rotate it, fine-tune yaw/pitch/roll with sliders, and set
 how deeply it is buried. The substrate and camera never move.
 
+The goal is to match the 3D view to an underwater camera image shown next to
+it. The app is also the custom front end of the
+[Bionic Mussels](https://www.zooniverse.org/projects/coopsciscoop/bionic-mussels)
+Zooniverse project, where volunteers pose the mussel for each image and submit
+the pose as a classification.
+
 ## Features
 
 - **Drag to rotate**: click and drag anywhere in the view to rotate the
@@ -16,9 +22,10 @@ how deeply it is buried. The substrate and camera never move.
 - **Zooniverse integration**: volunteers get images from the Bionic Mussels
   workflow, optionally sign in with their Zooniverse account, and submit the
   pose as a classification (see [Zooniverse mode](#zooniverse-mode)).
-- **Reference image side by side**: the underwater camera image set by
-  `image_file` is shown on the left, and the 3D view on the right uses the
-  same aspect ratio so the two can be matched.
+- **Reference image side by side**: the underwater camera image (a
+  Zooniverse subject, or `image_file` in local mode) is shown on the left, and
+  the 3D view on the right uses the same aspect ratio so the two can be
+  matched.
 - Substrate as a solid color or as an image (e.g. a photo of the sediment).
 - Options for a see-through substrate (to see the buried part) and the
   mussel's body axes.
@@ -62,7 +69,8 @@ the app converts automatically (locally this takes a few seconds).
 - A browser with WebGL (any modern browser), and internet access to load
   three.js from cdn.jsdelivr.net.
 - See [`requirements.txt`](requirements.txt) (Streamlit, NumPy, SciPy, Pillow,
-  and `usd-core` for reading the source `.usdc` model).
+  `usd-core` for reading the source `.usdc` model, `requests` for the
+  Zooniverse API, and `pytest` for the tests).
 
 ## Setup
 
@@ -79,6 +87,9 @@ streamlit run app.py
 ```
 
 This opens the app in your browser (by default at `http://localhost:8501`).
+Without `.streamlit/secrets.toml` it runs in local mode, showing `image_file`
+from `render_config.toml`; to run it against Zooniverse, set up the secrets as
+described in [Zooniverse mode](#zooniverse-mode).
 
 To regenerate the viewer assets, for example after changing the model or
 the conversion settings, run the following and commit the updated files in
@@ -99,32 +110,34 @@ mussel_viewer/frontend/      three.js viewer (plain HTML/JS/CSS, no build step)
 geometry.py                  Python pose helpers (quaternion/Euler -> rotation matrix)
 app.py                       Streamlit entrypoint: camera image + viewer (local or Zooniverse mode)
 zooniverse.py                Panoptes HTTP client: OAuth, subjects, classifications
-render_config.json           Mode, camera + color configuration (see below)
+render_config.toml           Mode, camera + color configuration (see below)
+sample_image.jpg             Example camera image for local mode
+sample_substrate.jpg         Example substrate image
 .streamlit/secrets.toml.example  Template for the Zooniverse secrets
 tests/                       Unit tests (pytest, no network)
 requirements.txt
 ```
 
-## `render_config.json`
+## `render_config.toml`
 
-Controls the fixed camera view, the scene's colors and the viewer size.
+Controls the image source, the fixed camera view, the scene's colors and the
+viewer size. The file is [TOML](https://toml.io/) and documents every option
+in comments:
 
-```json
-{
-  "mode": "zooniverse",
-  "image_file": "sample_image.jpg",
-  "camera": {
-    "elevation_deg": 25.0,
-    "azimuth_deg": 45.0,
-    "distance_scale": 1.0
-  },
-  "substrate_mode": "image",
-  "substrate_image": "sample_substrate.jpg",
-  "substrate_color": "#C2B280",
-  "background_color": "#FFFFFF",
-  "substrate_size_scale": 2.2,
-  "viewer_height": 640
-}
+```toml
+mode = "zooniverse"
+image_file = "sample_image.jpg"
+substrate_mode = "image"
+substrate_image = "sample_substrate.jpg"
+substrate_color = "#C2B280"
+substrate_size_scale = 2.2
+background_color = "#FFFFFF"
+viewer_height = 640
+
+[camera]
+elevation_deg = 25.0
+azimuth_deg = 45.0
+distance_scale = 1.0
 ```
 
 | Field | Description |
@@ -214,15 +227,15 @@ slash), or Zooniverse rejects the sign-in.
 
 ### Classification format
 
-Each classification has one annotation for task `T0` whose value is the pose
-(an object, not an answer index, so analyze it from the raw classification
-export rather than with Zooniverse's aggregation tools):
+Each classification answers task `T0` with `0`, the index of its only answer,
+"Pose matched". The pose itself is in `metadata.pose`: the workflow
+classification export translates single-choice values to answer labels (and
+shows anything else as "unknown answer label"), while it keeps the metadata
+column intact.
 
 ```json
 {
-  "annotations": [{"task": "T0", "value": {
-    "quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
-    "yaw": 12.5, "pitch": -3.0, "roll": 40.0, "height": -0.25}}],
+  "annotations": [{"task": "T0", "value": 0}],
   "metadata": {
     "workflow_version": "2.5",
     "started_at": "…", "finished_at": "…",
@@ -231,6 +244,8 @@ export rather than with Zooniverse's aggregation tools):
     "source": "mussel-visualizer",
     "subject_dimensions": [{"naturalWidth": 1920, "naturalHeight": 1080,
                             "clientWidth": null, "clientHeight": null}],
+    "pose": {"quaternion": {"w": 0.93, "x": 0.34, "y": -0.07, "z": 0.10},
+             "yaw": 12.5, "pitch": -3.0, "roll": 40.0, "height": -0.25},
     "pose_convention": "intrinsic ZYX Euler (deg); quaternion is authoritative; height in [-1, 0]",
     "camera": {"elevation_deg": 25.0, "azimuth_deg": 45.0, "distance_scale": 1.0}
   },
@@ -240,7 +255,7 @@ export rather than with Zooniverse's aggregation tools):
 ```
 
 `workflow_version` is read from the API when the session starts. `camera` is
-the camera used while posing (from `render_config.json`), so the pose can be
+the camera used while posing (from `render_config.toml`), so the pose can be
 interpreted even if the configuration changes later.
 
 ### Known limitations

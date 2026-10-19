@@ -281,7 +281,7 @@ canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
 
 // ---------------------------------------------------------------------------
-// Config from Python (render_config.json) and model loading
+// Config from Python (render_config.toml) and model loading
 // ---------------------------------------------------------------------------
 function applyConfig(config, radius) {
   const cam = config.camera || {};

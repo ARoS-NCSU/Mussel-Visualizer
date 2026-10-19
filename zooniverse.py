@@ -22,6 +22,10 @@ OAUTH_SCOPE = "public user subject classification"
 TIMEOUT = 15  # seconds, on every request
 
 TASK_KEY = "T0"
+# T0 is a single-choice question; its only answer is "Pose matched". The
+# workflow export turns the value into that answer's label, so it must be the
+# answer index: the pose itself goes in the classification metadata.
+POSE_MATCHED_ANSWER = 0
 USER_AGENT = "Mussel-Visualizer/1.0 (Streamlit)"
 SOURCE = "mussel-visualizer"
 POSE_CONVENTION = "intrinsic ZYX Euler (deg); quaternion is authoritative; height in [-1, 0]"
@@ -156,7 +160,7 @@ def classification_payload(
     subject_dimensions: list,
     camera: dict | None = None,
 ) -> dict:
-    value = {
+    pose_value = {
         "quaternion": pose["quaternion"],
         "yaw": pose["yaw"],
         "pitch": pose["pitch"],
@@ -165,7 +169,7 @@ def classification_payload(
     }
     return {
         "classifications": {
-            "annotations": [{"task": TASK_KEY, "value": value}],
+            "annotations": [{"task": TASK_KEY, "value": POSE_MATCHED_ANSWER}],
             "metadata": {
                 "workflow_version": str(workflow_version),
                 "started_at": started_at,
@@ -175,6 +179,7 @@ def classification_payload(
                 "user_agent": USER_AGENT,
                 "source": SOURCE,
                 "subject_dimensions": subject_dimensions,
+                "pose": pose_value,
                 "pose_convention": POSE_CONVENTION,
                 "camera": camera or {},
             },

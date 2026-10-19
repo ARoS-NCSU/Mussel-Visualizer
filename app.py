@@ -4,7 +4,7 @@ The image is shown on the left so the 3D view on the right can be posed to
 match it. All rendering and interaction (drag-to-rotate, orientation and
 burial sliders) happens inside the three.js component in the browser.
 
-Two modes (``mode`` in render_config.json):
+Two modes (``mode`` in render_config.toml):
 
 - **Zooniverse** (default, when the ``[zooniverse]`` secrets exist): the image
   is the next subject of the Bionic Mussels workflow, and the pose is
@@ -16,8 +16,8 @@ from __future__ import annotations
 import base64
 import datetime
 import io
-import json
 import os
+import tomllib
 
 import requests
 import streamlit as st
@@ -27,7 +27,7 @@ import zooniverse
 from mussel_viewer import assets_exist, mussel_viewer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-RENDER_CONFIG_PATH = os.path.join(_HERE, "render_config.json")
+RENDER_CONFIG_PATH = os.path.join(_HERE, "render_config.toml")
 
 DEFAULT_POSE = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0, "height": 0.0}
 # Longest side of the image sent to the browser; camera frames are much larger.
@@ -59,8 +59,8 @@ def ensure_assets() -> None:
 
 
 def load_render_config() -> dict:
-    with open(RENDER_CONFIG_PATH, "r") as f:
-        return json.load(f)
+    with open(RENDER_CONFIG_PATH, "rb") as f:
+        return tomllib.load(f)
 
 
 def read_secrets(section: str) -> dict | None:
@@ -139,7 +139,7 @@ zoo_mode = render_config.get("mode", "zooniverse") == "zooniverse" and zoo_secre
 
 
 # ===========================================================================
-# Local mode: the image from render_config.json, nothing is submitted.
+# Local mode: the image from render_config.toml, nothing is submitted.
 # ===========================================================================
 if not zoo_mode:
     st.title("Mussel 3D Visualizer")
@@ -157,7 +157,7 @@ if not zoo_mode:
         elif image_file:
             st.warning(f"`{image_file}` was not found next to app.py.", title="Image not found")
         else:
-            st.info("Set `image_file` in render_config.json to show a camera image.")
+            st.info("Set `image_file` in render_config.toml to show a camera image.")
 
     with viewer_col:
         mussel_viewer(
